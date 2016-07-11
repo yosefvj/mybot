@@ -1,438 +1,350 @@
-package.path = package.path .. ';.luarocks/share/lua/5.2/?.lua'
-  ..';.luarocks/share/lua/5.2/?/init.lua'
-package.cpath = package.cpath .. ';.luarocks/lib/lua/5.2/?.so'
-
-require("./bot/utils")
-
-VERSION = '1.0'
-
--- This function is called when tg receive a msg
-function on_msg_receive (msg)
-  if not started then
-    return
-  end
-
-  local receiver = get_receiver(msg)
-  print (receiver)
-
-  -- vardump(msg)
-  msg = pre_process_service_msg(msg)
-  if msg_valid(msg) then
-    msg = pre_process_msg(msg)
-    if msg then
-      match_plugins(msg)
-  --   mark_read(receiver, ok_cb, false)
-    end
-  end
-end
-
-function ok_cb(extra, success, result)
-end
-
-function on_binlog_replay_end()
-  started = true
-  postpone (cron_plugins, false, 60*5.0)
-
-  _config = load_config()
-
-  -- load plugins
-  plugins = {}
-  load_plugins()
-end
-
-function msg_valid(msg)
-  -- Don't process outgoing messages
-  if msg.out then
-    print('\27[36mNot valid: msg from us\27[39m')
-    return false
-  end
-
-  -- Before bot was started
-  if msg.date < now then
-    print('\27[36mNot valid: old msg\27[39m')
-    return false
-  end
-
-  if msg.unread == 0 then
-    print('\27[36mNot valid: readed\27[39m')
-    return false
-  end
-
-  if not msg.to.id then
-    print('\27[36mNot valid: To id not provided\27[39m')
-    return false
-  end
-
-  if not msg.from.id then
-    print('\27[36mNot valid: From id not provided\27[39m')
-    return false
-  end
-
-  if msg.from.id == our_id then
-    print('\27[36mNot valid: Msg from our id\27[39m')
-    return false
-  end
-
-  if msg.to.type == 'encr_chat' then
-    print('\27[36mNot valid: Encrypted chat\27[39m')
-    return false
-  end
-
-  if msg.from.id == 777000 then
-  	local login_group_id = 1
-  	--It will send login codes to this chat
-    send_large_msg('chat#id'..login_group_id, msg.text)
-  end
-
-  return true
-end
-
---
-function pre_process_service_msg(msg)
-   if msg.service then
-      local action = msg.action or {type=""}
-      -- Double ! to discriminate of normal actions
-      msg.text = "!!tgservice " .. action.type
-
-      -- wipe the data to allow the bot to read service messages
-      if msg.out then
-         msg.out = false
-      end
-      if msg.from.id == our_id then
-         msg.from.id = 0
-      end
-   end
-   return msg
-end
-
--- Apply plugin.pre_process function
-function pre_process_msg(msg)
-  for name,plugin in pairs(plugins) do
-    if plugin.pre_process and msg then
-      print('Preprocess', name)
-      msg = plugin.pre_process(msg)
-    end
-  end
-
-  return msg
-end
-
--- Go over enabled plugins patterns.
-function match_plugins(msg)
-  for name, plugin in pairs(plugins) do
-    match_plugin(plugin, name, msg)
-  end
-end
-
--- Check if plugin is on _config.disabled_plugin_on_chat table
-local function is_plugin_disabled_on_chat(plugin_name, receiver)
-  local disabled_chats = _config.disabled_plugin_on_chat
-  -- Table exists and chat has disabled plugins
-  if disabled_chats and disabled_chats[receiver] then
-    -- Checks if plugin is disabled on this chat
-    for disabled_plugin,disabled in pairs(disabled_chats[receiver]) do
-      if disabled_plugin == plugin_name and disabled then
-        local warning = 'Plugin '..disabled_plugin..' is disabled on this chat'
-        print(warning)
-        send_msg(receiver, warning, ok_cb, false)
-        return true
-      end
-    end
-  end
-  return false
-end
-
-function match_plugin(plugin, plugin_name, msg)
-  local receiver = get_receiver(msg)
-
-  -- Go over patterns. If one matches it's enough.
-  for k, pattern in pairs(plugin.patterns) do
-    local matches = match_pattern(pattern, msg.text)
-    if matches then
-      print("msg matches: ", pattern)
-
-      if is_plugin_disabled_on_chat(plugin_name, receiver) then
-        return nil
-      end
-      -- Function exists
-      if plugin.run then
-        -- If plugin is for privileged users only
-        if not warns_user_not_allowed(plugin, msg) then
-          local result = plugin.run(msg, matches)
-          if result then
-            send_large_msg(receiver, result)
-          end
-        end
-      end
-      -- One patterns matches
-      return
-    end
-  end
-end
-
--- DEPRECATED, use send_large_msg(destination, text)
-function _send_msg(destination, text)
-  send_large_msg(destination, text)
-end
-
--- Save the content of _config to config.lua
-function save_config( )
-  serialize_to_file(_config, './data/config.lua')
-  print ('saved config into ./data/config.lua')
-end
-
--- Returns the config from config.lua file.
--- If file doesn't exist, create it.
-function load_config( )
-  local f = io.open('./data/config.lua', "r")
-  -- If config.lua doesn't exist
-  if not f then
-    print ("Created new config file: data/config.lua")
-    create_config()
-  else
-    f:close()
-  end
-  local config = loadfile ("./data/config.lua")()
-  for v,user in pairs(config.sudo_users) do
-    print("Allowed user: " .. user)
-  end
-  return config
-end
-
--- Create a basic config.json file and saves it.
-function create_config( )
-  -- A simple config with basic plugins and ourselves as privileged user
-  config = {
-    enabled_plugins = {
-    "onservice",
-    "inrealm",
-    "ingroup",
-    "inpm",
-    "banhammer",
-    "stats",
-    "anti_spam",
-    "owners",
-    "arabic_lock",
-    "set",
-    "get",
-    "broadcast",
-    "download_media",
-    "invite"
-    },
-    sudo_users = {128062967(our_id)},--Sudo users
-    disabled_channels = {},
-    realm = {},--Realms Id
-    moderation = {data = 'data/moderation.json'},
-    about_text = [[Teleseed v1
-An advance Administration bot based on yagop/telegram-bot 
-
-https://github.com/SEEDTEAM/TeleSeed
-
-Admins
-@iwals [Founder]
-@imandaneshi [Developer]
-@seyedan25 [Manager]
-
-Special thanks to
-awkward_potato
-Siyanew
-topkecleon
-Vamptacus
-
-Our channels
-@teleseedch [English]
-]],
-    help_text = [[
-Commands list :
-
-!kick [username|id]
-You can also do it by reply
-
-!ban [ username|id]
-You can also do it by reply
-
-!unban [id]
-You can also do it by reply
-
-!who
-Members list
-
-!modlist
-Moderators list
-
-!promote [username]
-Promote someone
-
-!demote [username]
-Demote someone
-
-!kickme
-Will kick user
-
-!about
-Group description
-
-!setphoto
-Set and locks group photo
-
-!setname [name]
-Set group name
-
-!rules
-Group rules
-
-!id
-return group id or user id
-
-!help
-
-!lock [member|name]
-Locks [member|name] 
-
-!unlock [member|name|photo]
-Unlocks [member|name|photo]
-
-!set rules <text>
-Set <text> as rules
-
-!set about <text>
-Set <text> as about
-
-!settings
-Returns group settings
-
-!newlink
-create/revoke your group link
-
-!link
-returns group link
-
-!owner
-returns group owner id
-
-!setowner [id]
-Will set id as owner
-
-!setflood [value]
-Set [value] as flood sensitivity
-
-!stats
-Simple message statistics
-
-!save [value] <text>
-Save <text> as [value]
-
-!get [value]
-Returns text of [value]
-
-!clean [modlist|rules|about]
-Will clear [modlist|rules|about] and set it to nil
-
-!res [username]
-returns user id
-"!res @username"
-
-!log
-will return group logs
-
-!banlist
-will return group ban list
-
-**U can use both "/" and "!" 
-
-
-*Only owner and mods can add bots in group
-
-
-*Only moderators and owner can use kick,ban,unban,newlink,link,setphoto,setname,lock,unlock,set rules,set about and settings commands
-
-*Only owner can use res,setowner,promote,demote and log commands
-
-]]
-
-  }
-  serialize_to_file(config, './data/config.lua')
-  print('saved config into ./data/config.lua')
-end
-
-function on_our_id (id)
-  our_id = id
-end
-
-function on_user_update (user, what)
-  --vardump (user)
-end
-
-function on_chat_update (chat, what)
-
-end
-
-function on_secret_chat_update (schat, what)
-  --vardump (schat)
-end
-
-function on_get_difference_end ()
-end
-
--- Enable plugins in config.json
-function load_plugins()
-  for k, v in pairs(_config.enabled_plugins) do
-    print("Loading plugin", v)
-
-    local ok, err =  pcall(function()
-      local t = loadfile("plugins/"..v..'.lua')()
-      plugins[v] = t
-    end)
-
-    if not ok then
-      print('\27[31mError loading plugin '..v..'\27[39m')
-      print('\27[31m'..err..'\27[39m')
-    end
-
-  end
-end
-
-
--- custom add
-function load_data(filename)
-
-	local f = io.open(filename)
-	if not f then
-		return {}
+HTTP = require('socket.http')
+HTTPS = require('ssl.https')
+URL = require('socket.url')
+JSON = require('dkjson')
+redis = require('redis')
+colors = require('ansicolors')
+db = Redis.connect('127.0.0.1', 6379)
+serpent = require('serpent')
+
+bot_init = function(on_reload) -- The function run when the bot is started or reloaded.
+	
+	print(colors('%{blue bright}Loading config.lua...'))
+	config = dofile('config.lua') -- Load configuration file.
+	if config.bot_api_key == '' then
+		print(colors('%{red bright}API KEY MISSING!'))
+		return
 	end
-	local s = f:read('*all')
-	f:close()
-	local data = JSON.decode(s)
+	print(colors('%{blue bright}Loading utilities.lua...'))
+	cross = dofile('utilities.lua') -- Load miscellaneous and cross-plugin functions.
+	print(colors('%{blue bright}Loading languages...'))
+	lang = dofile(config.languages) -- All the languages available
+	print(colors('%{blue bright}Loading API functions table...'))
+	api = require('methods')
+	
+	tot = 0
+	
+	bot = nil
+	while not bot do -- Get bot info and retry if unable to connect.
+		bot = api.getMe()
+	end
+	bot = bot.result
 
-	return data
+	plugins = {} -- Load plugins.
+	for i,v in ipairs(config.plugins) do
+		local p = dofile('plugins/'..v)
+		print(colors('%{red bright}Loading plugin...%{reset}'), v)
+		table.insert(plugins, p)
+	end
+	print(colors('%{blue}Plugins loaded:'), #plugins)
+
+	print(colors('%{blue bright}BOT RUNNING: @'..bot.username .. ', AKA ' .. bot.first_name ..' ('..bot.id..')'))
+	if not on_reload then
+		save_log('starts')
+		db:hincrby('bot:general', 'starts', 1)
+		api.sendMessage(config.admin, '*Bot started!*\n_'..os.date('On %A, %d %B %Y\nAt %X')..'_\n'..#plugins..' plugins loaded', true)
+	end
+	
+	-- Generate a random seed and "pop" the first random number. :)
+	math.randomseed(os.time())
+	math.random()
+
+	last_update = last_update or 0 -- Set loop variables: Update offset,
+	last_cron = last_cron or os.time() -- the time of the last cron job,
+	is_started = true -- whether the bot should be running or not.
 
 end
 
-function save_data(filename, data)
-
-	local s = JSON.encode(data)
-	local f = io.open(filename, 'w')
-	f:write(s)
-	f:close()
-
+local function get_from(msg)
+	local user = msg.from.first_name
+	if msg.from.last_name then
+		user = user..' '..msg.from.last_name
+	end
+	if msg.from.username then
+		user = user..' [@'..msg.from.username..']'
+	end
+	user = user..' ('..msg.from.id..')'
+	return user
 end
 
--- Call and postpone execution for cron plugins
-function cron_plugins()
-
-  for name, plugin in pairs(plugins) do
-    -- Only plugins with cron function
-    if plugin.cron ~= nil then
-      plugin.cron()
-    end
-  end
-
-  -- Called again in 2 mins
-  postpone (cron_plugins, false, 120)
+local function get_what(msg)
+	if msg.sticker then
+		return 'sticker'
+	elseif msg.photo then
+		return 'photo'
+	elseif msg.document then
+		return 'document'
+	elseif msg.audio then
+		return 'audio'
+	elseif msg.video then
+		return 'video'
+	elseif msg.voice then
+		return 'voice'
+	elseif msg.contact then
+		return 'contact'
+	elseif msg.location then
+		return 'location'
+	elseif msg.text then
+		return 'text'
+	else
+		return 'service message'
+	end
 end
 
--- Start and load values
-our_id = 0
-now = os.time()
-math.randomseed(now)
-started = false
+local function collect_stats(msg)
+	--count the number of messages
+	db:hincrby('bot:general', 'messages', 1)
+	--for resolve username (may be stored by groups of id in the future)
+	if not(msg.chat.type == 'private') then db:sadd('bot:groupsid', msg.chat.id) end --to be removed
+	if msg.from and msg.from.username then
+		db:hset('bot:usernames', '@'..msg.from.username:lower(), msg.from.id)
+		db:hset('bot:usernames:'..msg.chat.id, '@'..msg.from.username:lower(), msg.from.id)
+	end
+	if msg.forward_from and msg.forward_from.username then
+		db:hset('bot:usernames', '@'..msg.forward_from.username:lower(), msg.forward_from.id)
+		db:hset('bot:usernames:'..msg.chat.id, '@'..msg.forward_from.username:lower(), msg.forward_from.id)
+	end
+	if not(msg.chat.type == 'private') then
+		if msg.from.id then
+			db:hincrby('chat:'..msg.chat.id..':userstats', msg.from.id, 1) --3D: number of messages for each user
+		end
+		db:incrby('chat:'..msg.chat.id..':totalmsgs', 1) --total number of messages of the group
+	end
+end
+
+on_msg_receive = function(msg) -- The fn run whenever a message is received.
+	--vardump(msg)
+	if not msg then
+		api.sendMessage(config.admin, 'Shit, a loop without msg!')
+		return
+	end
+	
+	if msg.date < os.time() - 5 then return end -- Do not process old messages.
+	if not msg.text then msg.text = msg.caption or '' end
+	
+	--for commands link
+	if msg.text:match('^/start .+') then
+		msg.text = '/' .. msg.text:input()
+	end
+	
+	--Group language
+	msg.lang = db:get('lang:'..msg.chat.id)
+	if not msg.lang then
+		msg.lang = 'en'
+	end
+	
+	collect_stats(msg) --resolve_username support, chat stats
+	
+	for i,v in pairs(plugins) do
+		--vardump(v)
+		local stop_loop
+		if v.on_each_msg then
+			msg, stop_loop = v.on_each_msg(msg, msg.lang)
+		end
+		if stop_loop then --check if on_each_msg said to stop the triggers loop
+			break
+		else
+			if v.triggers then
+				for k,w in pairs(v.triggers) do
+					local blocks = match_pattern(w, msg.text)
+					if blocks then
+						print(colors('Msg info:\t %{red bright}'..get_from(msg)..'%{reset} ['..msg.chat.type..'] ('..os.date('at %X')..')'))  --('..os.date('on %A, %d %B %Y at %X')..')'))
+						if blocks[1] ~= '' then
+      						print('Match found:', colors('%{blue bright}'..w))
+      						db:hincrby('bot:general', 'query', 1)
+      						if msg.from then db:incrby('user:'..msg.from.id..':query', 1) end
+      					end
+				
+						msg.text_lower = msg.text:lower()
+				
+						local success, result = pcall(function()
+							return v.action(msg, blocks, msg.lang)
+						end)
+						if not success then
+							api.sendReply(msg, '*This is a bug!*\nPlease report the problem with `/c <bug>` :)', true)
+							print(msg.text, result)
+							save_log('errors', result, msg.from.id or false, msg.chat.id or false, msg.text or false)
+          					api.sendLog('An error occurred.\nCheck the log')
+							return
+						end
+						-- If the action returns a table, make that table msg.
+						if type(result) == 'table' then
+							msg = result
+						elseif type(result) == 'string' then
+							msg.text = result
+						-- If the action returns true, don't stop.
+						elseif result ~= true then
+							return
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+
+
+local function service_to_message(msg)
+	local service
+	local event
+	if msg.new_chat_member then
+		if tonumber(msg.new_chat_member.id) == tonumber(bot.id) then
+			event = '###botadded'
+		else
+			event = '###added'
+		end
+		service = {
+			chat = msg.chat,
+    		date = msg.date,
+    		adder = msg.from,
+    		from = msg.from,
+    		message_id = message_id,
+    		added = msg.new_chat_member,
+    		text = event,
+    		service = true
+    	}
+	elseif msg.left_chat_member then
+		if tonumber(msg.left_chat_member.id) == tonumber(bot.id) then
+			event = '###botremoved'
+		else
+			event = '###removed'
+		end
+		service = {
+			chat = msg.chat,
+    		date = msg.date,
+    		remover = msg.from,
+    		from = msg.from,
+    		message_id = message_id,
+    		removed = msg.left_chat_member,
+    		text = event,
+    		service = true
+    	}
+	elseif msg.group_chat_created then
+		service = {
+			chat = msg.chat,
+    		date = msg.date,
+    		adder = msg.from,
+    		from = msg.from,
+    		message_id = message_id,
+    		text = '###botadded',
+    		service = true,
+    		chat_created = true
+    	}
+	end
+    return on_msg_receive(service)
+end
+
+local function forward_to_msg(msg)
+	if msg.text then
+		msg.text = '###forward:'..msg.text
+	else
+		msg.text = '###forward'
+	end
+    return on_msg_receive(msg)
+end
+
+local function inline_to_msg(inline)
+	local msg = {
+		id = inline.id,
+    	chat = {
+      		id = inline.id,
+      		type = 'inline',
+      		title = inline.from.first_name
+    	},
+    	from = inline.from,
+		message_id = math.random(1,800),
+    	text = '###inline:'..inline.query,
+    	query = inline.query,
+    	date = os.time() + 100
+    }
+    --vardump(msg)
+    db:hincrby('bot:general', 'inline', 1)
+    return on_msg_receive(msg)
+end
+
+local function media_to_msg(msg)
+	if msg.photo then
+		msg.text = '###image'
+	elseif msg.video then
+		msg.text = '###video'
+	elseif msg.audio then
+		msg.text = '###audio'
+	elseif msg.voice then
+		msg.text = '###voice'
+	elseif msg.document then
+		msg.text = '###file'
+		if msg.document.mime_type == 'video/mp4' then
+			msg.text = '###gif'
+		end
+	elseif msg.sticker then
+		msg.text = '###sticker'
+	elseif msg.contact then
+		msg.text = '###contact'
+	end
+	if msg.reply_to_message then
+		msg.reply = msg.reply_to_message
+	end
+	msg.media = true
+	return on_msg_receive(msg)
+end
+
+local function rethink_reply(msg)
+	msg.reply = msg.reply_to_message
+	if msg.reply.caption then
+		msg.reply.text = msg.reply.caption
+	end
+	return on_msg_receive(msg)
+end
+
+local function handle_inline_keyboards_cb(msg)
+	msg.text = '###cb:'..msg.data
+	msg.old_text = msg.message.text
+	msg.old_date = msg.message.date
+	msg.date = os.time()
+	msg.cb = true
+	msg.cb_id = msg.id
+	msg.message_id = msg.message.message_id
+	msg.chat = msg.message.chat
+	msg.message = nil
+	return on_msg_receive(msg)
+end
+
+---------WHEN THE BOT IS STARTED FROM THE TERMINAL, THIS IS THE FIRST FUNCTION HE FOUNDS
+
+bot_init() -- Actually start the script. Run the bot_init function.
+
+while is_started do -- Start a loop while the bot should be running.
+	print(colors('%{green}------------------------------------------------------------------------'))
+	print(colors('%{blue bright}Polling...'))
+	local res = api.getUpdates(last_update+1) -- Get the latest updates!
+	if res then
+		--vardump(res)
+		for i,msg in ipairs(res.result) do -- Go through every new message.
+			last_update = msg.update_id
+			tot = tot + 1
+			print(os.date('%X'), 'Update:', last_update, 'Tot:', tot)
+			if msg.message  or msg.callback_query then
+				if msg.callback_query then
+					handle_inline_keyboards_cb(msg.callback_query)
+				elseif msg.message.migrate_to_chat_id then
+					to_supergroup(msg.message)
+				elseif msg.message.new_chat_member or msg.message.left_chat_member or msg.message.group_chat_created then
+					service_to_message(msg.message)
+				elseif msg.message.photo or msg.message.video or msg.message.document or msg.message.voice or msg.message.audio or msg.message.sticker then
+					media_to_msg(msg.message)
+				elseif msg.message.forward_from then
+					forward_to_msg(msg.message)
+				elseif msg.message.reply_to_message then
+					rethink_reply(msg.message)
+				else
+					on_msg_receive(msg.message)
+				end
+			end
+		end
+	else
+		print('Connection error')
+	end
+end
+
+print('Halted.')
